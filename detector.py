@@ -1,0 +1,312 @@
+import cv2
+import numpy as np
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
+
+from depth import DepthBasedSelector
+from focus_det import FocusSelector
+from saliency_det import SaliencySelector
+
+
+@dataclass
+class DetectionWeights:
+    focus: float = 1.0
+    saliency: float = 1.5
+    depth: float = 1.0
+
+
+class DetPb:
+    """
+    Combined photobomber detection using Focus, Saliency, and Depth.
+
+    This module is a pure detection component (no CLI); the main entrypoint
+    for the full pipeline is `pipeline.py`.
+    """
+
+    def __init__(
+        self,
+        saliency_model: str = "inspyrenet",
+        depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf",
+        weights: DetectionWeights | None = None,
+    ):
+        self.weights = weights or DetectionWeights()
+        self.saliency_backend = saliency_model
+        self.depth_model_name = depth_model
+
+        # Lazy-loaded selectors
+        self._focus_selector = None
+        self._saliency_selector = None
+        self._depth_selector = None
+
+    @property
+    def focus_selector(self):
+        """Lazy load focus selector."""
+        if self._focus_selector is None:
+            self._focus_selector = FocusSelector()
+        return self._focus_selector
+
+    @property
+    def saliency_selector(self):
+        """Lazy load saliency selector."""
+        if self._saliency_selector is None:
+            self._saliency_selector = SaliencySelector(backend=self.saliency_backend)
+        return self._saliency_selector
+
+    @property
+    def depth_selector(self):
+        """Lazy load depth selector."""
+        if self._depth_selector is None:
+            self._depth_selector = DepthBasedSelector(self.depth_model_name)
+        return self._depth_selector
+
+    # 1) Focus analysis
+    def analyze_focus(self, image: np.ndarray, persons: List[Dict]) -> List[Dict]:
+        print("  Analyzing focus/blur...")
+        persons = self.focus_selector.compute_sharpness(image, persons)
+
+        # Compute relative scores (normalize to [0, 1])
+        max_sharpness = max(p["sharpness"] for p in persons) if persons else 1.0
+        for person in persons:
+            person["focus_score"] = (
+                person["sharpness"] / max_sharpness if max_sharpness > 0 else 1.0
+            )
+
+        return persons
+
+    # 2) Saliency analysis
+    def analyze_saliency(
+        self, image: np.ndarray, persons: List[Dict]
+    ) -> Tuple[List[Dict], np.ndarray]:
+        print("  Analyzing saliency...")
+        saliency_map = self.saliency_selector.get_saliency_map(image)
+        persons = self.saliency_selector.compute_person_saliency(saliency_map, persons)
+
+        # Compute relative scores (normalize to [0, 1])
+        max_saliency = max(p["saliency"] for p in persons) if persons else 1.0
+        for person in persons:
+            person["saliency_score"] = (
+                person["saliency"] / max_saliency if max_saliency > 0 else 1.0
+            )
+
+        return persons, saliency_map
+
+    # 3) Depth analysis
+    def analyze_depth(
+        self, image: np.ndarray, persons: List[Dict]
+    ) -> Tuple[List[Dict], np.ndarray]:
+        print("  Analyzing depth...")
+        depth_map = self.depth_selector.estimate_depth(image)
+        persons = self.depth_selector.compute_person_depths(depth_map, persons)
+
+        # Compute relative scores (normalize to [0, 1], closer to max depth = main subject)
+        max_depth = max(p["depth"] for p in persons) if persons else 1.0
+        for person in persons:
+            person["depth_score"] = (
+                person["depth"] / max_depth if max_depth > 0 else 1.0
+            )
+
+        return persons, depth_map
+
+    def classify_pb(
+        self,
+        persons: List[Dict],
+        focus_thr: float,
+        saliency_thr: float,
+        depth_thr: float,
+        combined_thr: float,
+    ) -> List[Dict]:
+        """
+        Classify photobombers using weighted combination.
+
+        All scores and thresholds are normalized to [0, 1] scale:
+        - focus_score: 1.0 = sharpest person, 0.0 = blurriest
+        - saliency_score: 1.0 = most salient person, 0.0 = least salient
+        - depth_score: 1.0 = closest person (max depth), 0.0 = farthest
+        - combined_score: weighted average of saliency + depth scores
+
+        Priority order:
+          1. If BLURRED (focus_score < focus_thr) → Photobomber
+          2. Else use weighted combination of saliency + depth
+        """
+        if not persons:
+            return persons
+
+        max_depth = max(p.get("depth", 0.0) for p in persons)
+
+        for person in persons:
+            focus_score = person.get("focus_score", 1.0)
+            saliency_score = person.get("saliency_score", 1.0)
+            depth_score = person.get("depth_score", 1.0)
+
+            # Priority conditions
+            is_blurred = focus_score < focus_thr
+            low_saliency = saliency_score < saliency_thr
+
+            # Depth: check if significantly different from closest person
+            depth_diff = abs(person.get("depth", max_depth) - max_depth)
+            is_depth_outlier = depth_diff > depth_thr
+
+            # Update person dict
+            person["is_blurred"] = is_blurred
+            person["is_low_saliency"] = low_saliency
+            person["is_depth_outlier"] = is_depth_outlier
+            person["depth_diff"] = depth_diff
+
+            # 1. Blur-first rule
+            if is_blurred:
+                person["is_photobomber"] = True
+                person["removal_reason"] = "blurred"
+                person["combined_score"] = focus_score
+                continue
+
+            # 2 & 3: Weighted combination of saliency and depth
+            total_weight = self.weights.saliency + self.weights.depth
+            combined_score = (
+                saliency_score * self.weights.saliency
+                + depth_score * self.weights.depth
+            ) / total_weight
+
+            person["combined_score"] = combined_score
+
+            # Final decision
+            if combined_score < combined_thr:
+                person["is_photobomber"] = True
+                if low_saliency and is_depth_outlier:
+                    person["removal_reason"] = "low_saliency_and_depth"
+                elif low_saliency:
+                    person["removal_reason"] = "low_saliency"
+                elif is_depth_outlier:
+                    person["removal_reason"] = "depth_outlier"
+                else:
+                    person["removal_reason"] = "low_combined_score"
+            else:
+                person["is_photobomber"] = False
+                person["removal_reason"] = None
+
+        return persons
+
+    def main(
+        self,
+        image: np.ndarray,
+        persons: List[Dict],
+        focus_thr: float = 0.4,
+        saliency_threshold: float = 0.5,
+        depth_threshold: float = 0.15,
+        combined_threshold: float = 0.5,
+    ) -> Dict:
+        """
+        Run complete detection pipeline on a single image + persons list.
+        """
+        print("Running combined photobomber detection...")
+        if not persons:
+            print("  No persons to analyze")
+            return {
+                "persons": [],
+                "mask": np.zeros(image.shape[:2], dtype=np.uint8),
+                "saliency_map": None,
+                "depth_map": None,
+            }
+
+        # 1) Focus
+        persons = self.analyze_focus(image, persons)
+        # 2) Saliency
+        persons, saliency_map = self.analyze_saliency(image, persons)
+        # 3) Depth
+        persons, depth_map = self.analyze_depth(image, persons)
+
+        # Classify
+        persons = self.classify_pb(
+            persons,
+            focus_thr,
+            saliency_threshold,
+            depth_threshold,
+            combined_threshold,
+        )
+
+        # Generate mask
+        mask = self._get_photobomber_mask(persons, image.shape)
+
+        # Logging
+        photobombers = [p for p in persons if p.get("is_photobomber", False)]
+        print(f"  Found {len(photobombers)}/{len(persons)} photobombers")
+
+        return {
+            "persons": persons,
+            "mask": mask,
+            "saliency_map": saliency_map,
+            "depth_map": depth_map,
+        }
+
+    def _get_photobomber_mask(self, persons: List[Dict], image_shape) -> np.ndarray:
+        """Generate combined mask of all identified photobombers."""
+        h, w, _ = image_shape
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+
+        for person in persons:
+            if person.get("is_photobomber", False):
+                pmask = person["mask"]
+                if pmask.shape != (h, w):
+                    pmask = cv2.resize(pmask.astype(np.float32), (w, h))
+                combined_mask = np.maximum(
+                    combined_mask, (pmask > 0.5).astype(np.uint8) * 255
+                )
+        return combined_mask
+
+    def visualize_results(self, image: np.ndarray, persons: List[Dict]) -> np.ndarray:
+        """Create visualization of detection results."""
+        vis = image.copy().astype(np.float32)
+
+        for person in persons:
+            mask = person["mask"]
+            if mask.shape != image.shape[:2]:
+                mask = cv2.resize(
+                    mask.astype(np.float32), (image.shape[1], image.shape[0])
+                )
+
+            mask_bool = mask > 0.5
+
+            if person.get("is_photobomber", False):
+                # Red overlay for photobombers
+                vis[mask_bool] = (
+                    vis[mask_bool] * 0.4 + np.array([0, 0, 255]) * 0.6
+                )
+                color = (0, 0, 255)
+                reason = person.get("removal_reason", "unknown")
+            else:
+                # Green overlay for main subjects
+                vis[mask_bool] = (
+                    vis[mask_bool] * 0.7 + np.array([0, 255, 0]) * 0.3
+                )
+                color = (0, 255, 0)
+                reason = "KEEP"
+
+            # Draw label
+            bbox = person["bbox"].astype(int)
+            label = f"ID:{person['id']} {reason}"
+            scores = (
+                f"F:{person.get('focus_score', 0):.2f} "
+                f"S:{person.get('saliency_score', 0):.2f} "
+                f"D:{person.get('depth_score', 0):.2f}"
+            )
+
+            cv2.putText(
+                vis,
+                label,
+                (bbox[0], bbox[1] - 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2,
+            )
+            cv2.putText(
+                vis,
+                scores,
+                (bbox[0], bbox[1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                color,
+                1,
+            )
+
+        return vis.astype(np.uint8)
+
