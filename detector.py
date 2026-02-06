@@ -1,3 +1,10 @@
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore', category=ImportWarning)
+
 import cv2
 import numpy as np
 from typing import List, Dict, Tuple
@@ -11,8 +18,8 @@ from saliency_det import SaliencySelector
 @dataclass
 class DetectionWeights:
     focus: float = 1.0
-    saliency: float = 1.5
-    depth: float = 1.0
+    saliency: float = 1.0
+    depth: float = 1.5
 
 
 class DetPb:
@@ -136,10 +143,6 @@ class DetPb:
             min_depth = 0.0  # Closest person (already normalized)
             max_depth = 1.0  # Farthest person (already normalized)
             depth_range = 1.0  # Always 1.0 since depths are normalized
-        else:
-            max_depth = 1.0
-            min_depth = 0.0
-            depth_range = 1.0
 
         for person in persons:
             focus_score = person.get("focus_score", 1.0)
@@ -245,9 +248,9 @@ class DetPb:
         self,
         image: np.ndarray,
         persons: List[Dict],
-        focus_thr: float = 0.4,
+        focus_thr: float = 0.2,
         saliency_threshold: float = 0.5,
-        depth_threshold: float = 0.1,
+        depth_threshold: float = 0.6,
         combined_threshold: float = 0.5,
         absolute_focus_thr: float = None,
     ) -> Dict:

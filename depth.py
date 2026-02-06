@@ -1,4 +1,15 @@
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore', category=ImportWarning)
+
 import torch
+import os
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
 from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 from PIL import Image
 import numpy as np
@@ -27,8 +38,20 @@ class DepthBasedSelector:
     depth = np.array(Image.fromarray(depth).resize(img.size))
     return depth
 
-  def compute_person_depths(self, depth_map, persons):
-    """Assign per-person depth normalized over persons (0=closest, 1=farthest)."""
+  def compute_person_depths(self, depth_map, persons, percentile: float = 75.0):
+    """Assign per-person depth normalized over persons (0=closest, 1=farthest).
+    
+    Uses percentile-based depth calculation instead of mean to better handle
+    depth variations within a person's mask.
+    
+    Args:
+      depth_map: Normalized depth map (0-1)
+      persons: List of person dicts with 'mask' key
+      percentile: Percentile to use for depth calculation (default: 75.0)
+    
+    Returns:
+      Modified persons list with 'depth' key added (normalized 0-1, 0=closest)
+    """
     h, w = depth_map.shape
 
     person_depths_raw = []
@@ -38,9 +61,14 @@ class DepthBasedSelector:
         mask = np.array(Image.fromarray(mask).resize((w, h)))
       person_pix_depth = depth_map[mask > 0.5]
       if len(person_pix_depth) > 0:
-        person_depths_raw.append(float(np.mean(person_pix_depth)))
+        # Compute percentile instead of mean
+        percentile_depth = np.percentile(person_pix_depth, percentile)
+        person_depths_raw.append(float(percentile_depth))
+        # Store the percentile value for reference
+        person['depth_percentile'] = float(percentile_depth)
       else:
         person_depths_raw.append(0.0)
+        person['depth_percentile'] = 0.0
     
     if person_depths_raw:
       min_person_depth = min(person_depths_raw)
@@ -49,6 +77,7 @@ class DepthBasedSelector:
       
       for person, raw_depth in zip(persons, person_depths_raw):
         if depth_range > 0:
+          # Normalize: 0.0 = closest person, 1.0 = farthest person
           person['depth'] = 1.0 - (raw_depth - min_person_depth) / depth_range
         else:
           person['depth'] = 0.0

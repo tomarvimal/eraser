@@ -79,10 +79,10 @@ python pipeline.py \
     --output path/to/result.jpg \
     --saliency \
     --depth \
-    --focus_thr 0.4 \
+    --focus_thr 0.2 \
     --absolute_focus_thr 200 \
     --saliency_thr 0.5 \
-    --depth_thr 0.15 \
+    --depth_thr 0.6 \
     --combined_thr 0.5 \
     --vis \
     --use_diffusion \
@@ -103,10 +103,10 @@ python pipeline.py \
 - `--depth`: Enable depth-based detection
 
 #### Detection Thresholds
-- `--focus_thr`: Relative blur threshold [0, 1] (default: 0.6)
+- `--focus_thr`: Relative blur threshold [0, 1] (default: 0.2)
 - `--absolute_focus_thr`: Absolute blur threshold (default: None). Typical values: 100-500. If set, uses absolute threshold instead of relative.
 - `--saliency_thr`: Saliency threshold [0, 1] (default: 0.5)
-- `--depth_thr`: Depth difference threshold [0, 1] (default: 0.15)
+- `--depth_thr`: Depth difference threshold [0, 1] (default: 0.6)
 - `--combined_thr`: Combined score threshold [0, 1] (default: 0.5)
 
 #### Models

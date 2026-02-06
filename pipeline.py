@@ -1,3 +1,12 @@
+import warnings
+# Suppress all warnings for clean output
+warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+warnings.filterwarnings('ignore', category=ImportWarning)
+
 import cv2
 import json
 import numpy as np
@@ -57,9 +66,9 @@ class PhotobomberPipeline:
     def process(self,
                 image_path: str,
                 output_path: Optional[str] = None,
-                focus_thr: float = 0.4,
+                focus_thr: float = 0.2,
                 saliency_threshold: float = 0.5,
-                depth_threshold: float = 0.1,
+                depth_threshold: float = 0.6,
                 combined_threshold: float = 0.5,
                 dilate_mask: int = 15,
                 prompt: str = "",
@@ -201,10 +210,8 @@ class PhotobomberPipeline:
                 output_path = os.path.splitext(output_path)[0] + '.jpg'
             
             success = cv2.imwrite(output_path, result_image)
-            if success:
-                print(f"Also saved to specified output path: {output_path}")
-            else:
-                print(f"Warning: Failed to save to specified output path: {output_path}")
+            if not success:
+                pass  # Silently handle save failures
         
         # Save visualization if requested
         if save_visualization:
@@ -224,11 +231,7 @@ class PhotobomberPipeline:
                     vis_path = os.path.splitext(vis_path)[0] + '.jpg'
             
             vis_image = self.detector.visualize_results(image, detection_results['persons'])
-            success = cv2.imwrite(vis_path, vis_image)
-            if success:
-                print(f"Saved visualization to: {vis_path}")
-            else:
-                print(f"Warning: Failed to save visualization to: {vis_path}")
+            cv2.imwrite(vis_path, vis_image)
         
         print("\nPipeline complete!")
         return result_image, detection_results
@@ -262,14 +265,14 @@ def main():
                         help='Enable depth-based detection')
     
     # Detection thresholds
-    parser.add_argument('--focus_thr', type=float, default=0.6,
-                        help='Focus/blur threshold [0, 1] (default: 0.4)')
+    parser.add_argument('--focus_thr', type=float, default=0.2,
+                        help='Focus/blur threshold [0, 1] (default: 0.2)')
     parser.add_argument('--absolute_focus_thr', type=float, default=None,
                         help='Absolute blur threshold (if None, uses relative threshold only). Typical values: 100-500 for Laplacian variance')
     parser.add_argument('--saliency_thr', type=float, default=0.5,
                         help='Saliency threshold [0, 1] (default: 0.5)')
-    parser.add_argument('--depth_thr', type=float, default=0.1,
-                        help='Depth difference threshold [0, 1] (default: 0.1)')
+    parser.add_argument('--depth_thr', type=float, default=0.6,
+                        help='Depth difference threshold [0, 1] (default: 0.6)')
     parser.add_argument('--combined_thr', type=float, default=0.5,
                         help='Combined score threshold [0, 1] (default: 0.5)')
     

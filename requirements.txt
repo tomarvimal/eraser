@@ -42,7 +42,8 @@ matplotlib==3.10.8
 mpmath==1.3.0
 networkx==3.4.2
 numba==0.63.1
-numpy==2.2.6
+simple-lama-inpainting==0.1.2
+numpy
 nvidia-cublas-cu12==12.8.4.1
 nvidia-cuda-cupti-cu12==12.8.90
 nvidia-cuda-nvrtc-cu12==12.8.93
@@ -59,8 +60,8 @@ nvidia-nvjitlink-cu12==12.8.93
 nvidia-nvshmem-cu12==3.4.5
 nvidia-nvtx-cu12==12.8.90
 opencv-python==4.11.0.86
-opencv-python-headless==4.13.0.90
-pillow==12.1.0
+opencv-python-headless
+pillow
 platformdirs==4.5.1
 polars==1.38.0
 polars-runtime-32==1.38.0
@@ -79,10 +80,9 @@ rembg==2.0.69
 requests==2.32.5
 rpds-py==0.30.0
 safetensors==0.7.0
-scikit-image==0.25.2
+scikit-image
 scipy==1.15.3
 shellingham==1.5.4
-simple-lama-inpainting==0.1.2
 simsimd==6.5.12
 six==1.17.0
 soupsieve==2.8.3
