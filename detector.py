@@ -28,10 +28,14 @@ class DetPb:
         saliency_model: str = "inspyrenet",
         depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf",
         weights: DetectionWeights | None = None,
+        use_saliency: bool = False,
+        use_depth: bool = False,
     ):
         self.weights = weights or DetectionWeights()
         self.saliency_backend = saliency_model
         self.depth_model_name = depth_model
+        self.use_saliency = use_saliency
+        self.use_depth = use_depth
 
         # Lazy-loaded selectors
         self._focus_selector = None
@@ -60,7 +64,8 @@ class DetPb:
         return self._depth_selector
 
     # 1) Focus analysis
-    def analyze_focus(self, image: np.ndarray, persons: List[Dict]) -> List[Dict]:
+    def analyze_focus(self, image: np.ndarray, persons: List[Dict], 
+                      absolute_focus_thr: float = None) -> List[Dict]:
         print("  Analyzing focus/blur...")
         persons = self.focus_selector.compute_sharpness(image, persons)
 
@@ -70,6 +75,14 @@ class DetPb:
             person["focus_score"] = (
                 person["sharpness"] / max_sharpness if max_sharpness > 0 else 1.0
             )
+        
+        # Absolute threshold check (if provided)
+        if absolute_focus_thr is not None:
+            for person in persons:
+                person["is_absolutely_blurred"] = person["sharpness"] < absolute_focus_thr
+        else:
+            for person in persons:
+                person["is_absolutely_blurred"] = False
 
         return persons
 
@@ -139,7 +152,13 @@ class DetPb:
             depth_score = person.get("depth_score", 1.0)
 
             # Priority conditions
-            is_blurred = focus_score < focus_thr
+            # Use absolute threshold if available, otherwise relative
+            if person.get("is_absolutely_blurred", False):
+                is_blurred = True
+            else:
+                # Relative threshold as fallback
+                is_blurred = focus_score < focus_thr
+            
             low_saliency = saliency_score < saliency_thr
 
             # Depth: check if significantly different from closest person
@@ -159,11 +178,18 @@ class DetPb:
                 person["combined_score"] = focus_score
                 continue
 
-            # 2 & 3: Weighted combination of saliency and depth
-            total_weight = self.weights.saliency + self.weights.depth
+            # 2 & 3: Combined score from enabled paradigms only
+            if not self.use_saliency and not self.use_depth:
+                person["is_photobomber"] = False
+                person["removal_reason"] = None
+                person["combined_score"] = 1.0
+                continue
+
+            w_s = self.weights.saliency if self.use_saliency else 0.0
+            w_d = self.weights.depth if self.use_depth else 0.0
+            total_weight = w_s + w_d
             combined_score = (
-                saliency_score * self.weights.saliency
-                + depth_score * self.weights.depth
+                saliency_score * w_s + depth_score * w_d
             ) / total_weight
 
             person["combined_score"] = combined_score
@@ -193,6 +219,7 @@ class DetPb:
         saliency_threshold: float = 0.5,
         depth_threshold: float = 0.15,
         combined_threshold: float = 0.5,
+        absolute_focus_thr: float = None,
     ) -> Dict:
         """
         Run complete detection pipeline on a single image + persons list.
@@ -207,12 +234,23 @@ class DetPb:
                 "depth_map": None,
             }
 
-        # 1) Focus
-        persons = self.analyze_focus(image, persons)
-        # 2) Saliency
-        persons, saliency_map = self.analyze_saliency(image, persons)
-        # 3) Depth
-        persons, depth_map = self.analyze_depth(image, persons)
+        # 1) Focus (always on)
+        persons = self.analyze_focus(image, persons, absolute_focus_thr=absolute_focus_thr)
+        # 2) Saliency (optional)
+        if self.use_saliency:
+            persons, saliency_map = self.analyze_saliency(image, persons)
+        else:
+            saliency_map = None
+            for p in persons:
+                p["saliency_score"] = 1.0
+        # 3) Depth (optional)
+        if self.use_depth:
+            persons, depth_map = self.analyze_depth(image, persons)
+        else:
+            depth_map = None
+            for p in persons:
+                p["depth_score"] = 1.0
+                p["depth"] = 1.0
 
         # Classify
         persons = self.classify_pb(
@@ -280,32 +318,35 @@ class DetPb:
                 color = (0, 255, 0)
                 reason = "KEEP"
 
-            # Draw label
+            # Draw bbox rectangle and labels
             bbox = person["bbox"].astype(int)
-            label = f"ID:{person['id']} {reason}"
+            cv2.rectangle(vis, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+
+            label = f"ID:{person['id']} {'REMOVE (' + reason + ')' if person.get('is_photobomber', False) else 'KEEP'}"
             scores = (
                 f"F:{person.get('focus_score', 0):.2f} "
                 f"S:{person.get('saliency_score', 0):.2f} "
-                f"D:{person.get('depth_score', 0):.2f}"
+                f"D:{person.get('depth_score', 0):.2f} "
+                f"C:{person.get('combined_score', 0):.2f}"
             )
 
             cv2.putText(
                 vis,
                 label,
-                (bbox[0], bbox[1] - 25),
+                (bbox[0], bbox[1] - 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.6,
                 color,
                 2,
             )
             cv2.putText(
                 vis,
                 scores,
-                (bbox[0], bbox[1] - 8),
+                (bbox[0], bbox[1] - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
+                0.5,
                 color,
-                1,
+                2,
             )
 
         return vis.astype(np.uint8)

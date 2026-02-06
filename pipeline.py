@@ -8,6 +8,7 @@ This module provides a complete pipeline that:
 """
 
 import cv2
+import json
 import numpy as np
 import os
 from argparse import ArgumentParser
@@ -27,7 +28,9 @@ class PhotobomberPipeline:
                  saliency_backend: str = 'inspyrenet',
                  depth_model: str = 'depth-anything/Depth-Anything-V2-Small-hf',
                  inpainting_model: str = 'runwayml/stable-diffusion-inpainting',
-                 use_lama: bool = True):
+                 use_lama: bool = True,
+                 use_saliency: bool = False,
+                 use_depth: bool = True):
         """
         Initialize the complete photobomber removal pipeline.
         
@@ -37,27 +40,55 @@ class PhotobomberPipeline:
             depth_model: HuggingFace model name for depth estimation
             inpainting_model: HuggingFace model name for diffusion inpainting
             use_lama: If True, use LaMa for inpainting; else use diffusion
+            use_saliency: If True, enable saliency-based detection
+            use_depth: If True, enable depth-based detection
         """
         self.segmenter = ObjSeg(seg_model)
-        self.detector = DetPb(saliency_model=saliency_backend, depth_model=depth_model)
+        self.detector = DetPb(
+            saliency_model=saliency_backend,
+            depth_model=depth_model,
+            use_saliency=use_saliency,
+            use_depth=use_depth
+        )
         self.inpainter = Inpainter(pretrained_chk=inpainting_model)
         self.use_lama = use_lama
     
-    def _get_intermediate_path(self, base_path: str, suffix: str, ext: str = None) -> str:
-        """Generate path for intermediate result file.
+    def _get_output_folder(self, image_path: str) -> str:
+        """Create and return output folder path based on input image name.
         
         Args:
-            base_path: Base file path (output_path or image_path)
+            image_path: Path to input image
+            
+        Returns:
+            Path to output folder (created if it doesn't exist)
+        """
+        # Get directory and filename without extension
+        image_dir = os.path.dirname(os.path.abspath(image_path))
+        image_name = os.path.splitext(os.path.basename(image_path))[0]
+        
+        # Create folder name based on image name
+        output_folder = os.path.join(image_dir, image_name)
+        
+        # Create folder if it doesn't exist
+        os.makedirs(output_folder, exist_ok=True)
+        
+        return output_folder
+    
+    def _get_intermediate_path(self, output_folder: str, suffix: str, ext: str = None) -> str:
+        """Generate path for intermediate result file in the output folder.
+        
+        Args:
+            output_folder: Path to output folder
             suffix: Suffix to add before extension (e.g., 'segmented', 'mask')
-            ext: File extension (if None, uses base_path extension or '.jpg')
+            ext: File extension (if None, defaults to '.jpg')
             
         Returns:
             Generated file path
         """
         if ext is None:
-            ext = os.path.splitext(base_path)[1] or '.jpg'
-        base = os.path.splitext(base_path)[0]
-        return f"{base}_{suffix}{ext}"
+            ext = '.jpg'
+        filename = f"{suffix}{ext}"
+        return os.path.join(output_folder, filename)
     
     def process(self,
                 image_path: str,
@@ -71,14 +102,16 @@ class PhotobomberPipeline:
                 negative_prompt: str = "",
                 save_visualization: bool = False,
                 vis_path: Optional[str] = None,
-                save_intermediates: bool = True) -> Tuple[np.ndarray, dict]:
+                save_intermediates: bool = True,
+                absolute_focus_thr: float = None) -> Tuple[np.ndarray, dict]:
         """
         Process an image to detect and remove photobombers.
         
         Args:
             image_path: Path to input image
             output_path: Path to save inpainted result (if None, returns only)
-            focus_thr: Blur detection threshold [0, 1]
+            focus_thr: Blur detection threshold [0, 1] (relative)
+            absolute_focus_thr: Absolute blur threshold (if None, uses relative threshold only). Typical values: 100-500
             saliency_threshold: Saliency threshold [0, 1]
             depth_threshold: Depth difference threshold [0, 1]
             combined_threshold: Combined score threshold [0, 1]
@@ -92,8 +125,9 @@ class PhotobomberPipeline:
         Returns:
             Tuple of (inpainted_image, detection_results_dict)
         """
-        # Determine base path for intermediate files
-        base_path = output_path if output_path else image_path
+        # Create output folder based on input image name
+        output_folder = self._get_output_folder(image_path)
+        print(f"  Output folder: {output_folder}")
         
         # Load image
         image = cv2.imread(image_path)
@@ -112,7 +146,7 @@ class PhotobomberPipeline:
         # Save segmentation overlay
         if save_intermediates and len(persons) > 0:
             seg_overlay = self.segmenter.overlay(image, persons)
-            seg_path = self._get_intermediate_path(base_path, 'segmented')
+            seg_path = self._get_intermediate_path(output_folder, 'segmented')
             cv2.imwrite(seg_path, seg_overlay)
             print(f"  Saved segmentation overlay to: {seg_path}")
         
@@ -128,7 +162,8 @@ class PhotobomberPipeline:
             focus_thr=focus_thr,
             saliency_threshold=saliency_threshold,
             depth_threshold=depth_threshold,
-            combined_threshold=combined_threshold
+            combined_threshold=combined_threshold,
+            absolute_focus_thr=absolute_focus_thr
         )
         
         photobombers = [p for p in detection_results['persons'] if p.get('is_photobomber', False)]
@@ -138,7 +173,7 @@ class PhotobomberPipeline:
         if save_intermediates:
             # Save photobomber mask
             mask = detection_results['mask']
-            mask_path = self._get_intermediate_path(base_path, 'mask', '.png')
+            mask_path = self._get_intermediate_path(output_folder, 'mask', '.png')
             cv2.imwrite(mask_path, mask)
             print(f"  Saved photobomber mask to: {mask_path}")
             
@@ -148,7 +183,7 @@ class PhotobomberPipeline:
                 # Normalize to 0-255 and apply colormap
                 depth_vis = (depth_map * 255).astype(np.uint8)
                 depth_colored = cv2.applyColorMap(depth_vis, cv2.COLORMAP_INFERNO)
-                depth_path = self._get_intermediate_path(base_path, 'depth')
+                depth_path = self._get_intermediate_path(output_folder, 'depth')
                 cv2.imwrite(depth_path, depth_colored)
                 print(f"  Saved depth map to: {depth_path}")
             
@@ -157,10 +192,34 @@ class PhotobomberPipeline:
                 saliency_map = detection_results['saliency_map']
                 # Normalize to 0-255
                 saliency_vis = (saliency_map * 255).astype(np.uint8)
-                saliency_path = self._get_intermediate_path(base_path, 'saliency')
+                saliency_path = self._get_intermediate_path(output_folder, 'saliency')
                 cv2.imwrite(saliency_path, saliency_vis)
                 print(f"  Saved saliency map to: {saliency_path}")
-        
+
+            # Save per-person detection results as JSON
+            json_path = self._get_intermediate_path(output_folder, 'detection', '.json')
+            json_persons = []
+            for p in detection_results['persons']:
+                entry = {
+                    'id': int(p['id']),
+                    'bbox': p['bbox'].tolist() if isinstance(p['bbox'], np.ndarray) else list(p['bbox']),
+                    'confidence': float(p.get('confidence', 0)),
+                    'focus_score': float(p.get('focus_score', 0)),
+                    'saliency_score': float(p.get('saliency_score', 0)),
+                    'depth_score': float(p.get('depth_score', 0)),
+                    'combined_score': float(p.get('combined_score', 0)),
+                    'is_photobomber': bool(p.get('is_photobomber', False)),
+                    'removal_reason': p.get('removal_reason'),
+                }
+                json_persons.append(entry)
+            detection_json = {
+                'image': os.path.basename(image_path),
+                'persons': json_persons,
+            }
+            with open(json_path, 'w') as f:
+                json.dump(detection_json, f, indent=2)
+            print(f"  Saved detection results to: {json_path}")
+
         # Step 3: Inpaint photobombers
         print("\n[Step 3] Inpainting photobombers...")
         mask = detection_results['mask']
@@ -178,17 +237,23 @@ class PhotobomberPipeline:
                 lama=self.use_lama
             )
         
-        # Save output if requested
-        if output_path:
+        # Save output (always save to output folder)
+        input_ext = os.path.splitext(image_path)[1] or '.jpg'
+        final_output_path = self._get_intermediate_path(output_folder, 'inpainted', input_ext)
+        cv2.imwrite(final_output_path, result_image)
+        print(f"\nSaved inpainted result to: {final_output_path}")
+        
+        # Also save to output_path if specified (for backward compatibility)
+        if output_path and output_path != final_output_path:
             cv2.imwrite(output_path, result_image)
-            print(f"\nSaved inpainted result to: {output_path}")
+            print(f"Also saved to specified output path: {output_path}")
         
         # Save visualization if requested
         if save_visualization:
             if vis_path is None:
-                vis_path = output_path.replace('.jpg', '_vis.jpg') if output_path else None
-                if vis_path is None:
-                    vis_path = image_path.replace('.jpg', '_vis.jpg').replace('.png', '_vis.png')
+                # Save in output folder
+                input_ext = os.path.splitext(image_path)[1] or '.jpg'
+                vis_path = self._get_intermediate_path(output_folder, 'visualization', input_ext)
             
             vis_image = self.detector.visualize_results(image, detection_results['persons'])
             cv2.imwrite(vis_path, vis_image)
@@ -214,16 +279,20 @@ def main():
                         help='Saliency detection backend')
     parser.add_argument('--depth_model', type=str, default='depth-anything/Depth-Anything-V2-Small-hf',
                         help='Depth estimation model')
-    parser.add_argument('--inpainting_model', type=str, default='kandinsky-community/kandinsky-2-2-decoder-inpaint',
+    parser.add_argument('--inpainting_model', type=str, default='runwayml/stable-diffusion-inpainting',
                         help='Diffusion inpainting model')
-    parser.add_argument('--use_lama', action='store_true', default=False,
-                        help='Use LaMa for inpainting (default: True)')
     parser.add_argument('--use_diffusion', action='store_true',
-                        help='Use diffusion for inpainting (overrides --use_lama)')
+                        help='Use diffusion for inpainting instead of LaMa')
+    parser.add_argument('--saliency', action='store_true',
+                        help='Enable saliency-based detection')
+    parser.add_argument('--depth', action='store_true',
+                        help='Enable depth-based detection')
     
     # Detection thresholds
-    parser.add_argument('--focus_thr', type=float, default=0.4,
+    parser.add_argument('--focus_thr', type=float, default=0.6,
                         help='Focus/blur threshold [0, 1] (default: 0.4)')
+    parser.add_argument('--absolute_focus_thr', type=float, default=None,
+                        help='Absolute blur threshold (if None, uses relative threshold only). Typical values: 100-500 for Laplacian variance')
     parser.add_argument('--saliency_thr', type=float, default=0.5,
                         help='Saliency threshold [0, 1] (default: 0.5)')
     parser.add_argument('--depth_thr', type=float, default=0.15,
@@ -242,11 +311,10 @@ def main():
     args = parser.parse_args()
     
     # Determine inpainting method
-    use_lama = not args.use_diffusion if args.use_diffusion else args.use_lama
+    use_lama = not args.use_diffusion
     
     # Set default output path
     if args.output is None:
-        import os
         base, ext = os.path.splitext(args.input)
         args.output = f"{base}_inpainted{ext}"
     
@@ -256,7 +324,9 @@ def main():
         saliency_backend=args.saliency_backend,
         depth_model=args.depth_model,
         inpainting_model=args.inpainting_model,
-        use_lama=use_lama
+        use_lama=use_lama,
+        use_saliency=args.saliency,
+        use_depth=args.depth
     )
     
     pipeline.process(
@@ -270,7 +340,8 @@ def main():
         prompt=args.prompt,
         negative_prompt=args.negative_prompt,
         save_visualization=args.vis,
-        vis_path=args.vis_path
+        vis_path=args.vis_path,
+        absolute_focus_thr=args.absolute_focus_thr
     )
 
 

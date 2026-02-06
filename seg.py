@@ -1,4 +1,3 @@
-from sympy import N
 from ultralytics import YOLO
 import cv2
 import numpy as np
@@ -53,19 +52,3 @@ class ObjSeg:
             overlay[mask > 0.5] = color
 
         return cv2.addWeighted(img, 1-alpha, overlay, alpha, 0)
-
-# if __name__ == "__main__":
-#     segmenter = ObjSeg("yolo11l-seg.pt")
-#     image = cv2.imread("/home/vimal/Documents/pbombing.jpg")
-
-#     # Get segmentation results
-#     results = segmenter.segment("/home/vimal/Documents/pbombing.jpg")
-#     persons = segmenter.person_mask(results)
-
-#     print(f"Found {len(persons)} people in the image")
-#     for p in persons:
-#         print(f"  Person {p['id']}: confidence={p['confidence']:.2f}")
-
-#     # Visualize
-#     vis = segmenter.overlay(image, persons)
-#     cv2.imwrite("/home/vimal/Documents/segmented.jpg", vis)
