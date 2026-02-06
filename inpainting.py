@@ -22,29 +22,13 @@ class Inpainter:
       self.pipe.enable_model_cpu_offload()      # Offloads to CPU when not in use
       
   def dilate_mask(self,mask,kernel_size=15):
-    """
-        Dilate mask to ensure clean edges after inpainting
-
-        Args:
-            mask: Binary mask (H, W)
-            kernel_size: Dilation amount in pixels
-
-        Returns:
-            dilated_mask: Binary mask
-    """
+    """Dilate mask to soften inpainting edges."""
     kernel = np.ones((kernel_size,kernel_size),np.uint8)
     dilated = cv2.dilate(mask,kernel,iterations =1)
     return dilated
 
   def inpaint(self,image,mask,dilate = 15,prompt="",negative_prompt="",inf_steps=30,guidance_scale=7.5,lama=True):
-    """
-    Inpaint photobombers using LaMa or diffusion.
-
-    Args:
-        image: Input image (BGR np.ndarray).
-        mask: Single-channel mask aligned with image (0 background, 255 removal).
-        dilate: Optional dilation (in pixels) applied to the binary mask.
-    """
+    """Inpaint masked regions using LaMa or diffusion."""
     # Ensure binary 0/255 mask from possible float or uint8 input
     if mask.dtype != np.uint8:
       mask = (mask > 0.5).astype(np.uint8) * 255

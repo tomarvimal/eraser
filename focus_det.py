@@ -4,23 +4,11 @@ import numpy as np
 
 class FocusSelector:
     def __init__(self) -> None:
-        """Selector that scores each person by sharpness (focus)."""
+        """Selector that scores each person by sharpness."""
         pass
 
     def compute_sharpness(self, image: np.ndarray, persons):
-        """
-        Compute a sharpness score for each person using multiple complementary metrics:
-        - Laplacian variance (edge detection)
-        - Sobel gradient magnitude variance
-        - Edge density (Canny-based)
-
-        Args:
-            image: Input image (BGR).
-            persons: List of person dicts with a 'mask' key.
-
-        Returns:
-            persons with added 'sharpness' key and individual metric keys.
-        """
+        """Compute sharpness metrics for each person."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
         # 1. Laplacian variance (existing method)

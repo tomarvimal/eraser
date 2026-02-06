@@ -16,24 +16,21 @@ class DetectionWeights:
 
 
 class DetPb:
-    """
-    Combined photobomber detection using Focus, Saliency, and Depth.
-
-    This module is a pure detection component (no CLI); the main entrypoint
-    for the full pipeline is `pipeline.py`.
-    """
+    """Photobomber detector combining focus, saliency and depth."""
 
     def __init__(
         self,
         saliency_model: str = "inspyrenet",
         depth_model: str = "depth-anything/Depth-Anything-V2-Small-hf",
         weights: DetectionWeights | None = None,
+        use_focus: bool = False,
         use_saliency: bool = False,
         use_depth: bool = False,
     ):
         self.weights = weights or DetectionWeights()
         self.saliency_backend = saliency_model
         self.depth_model_name = depth_model
+        self.use_focus = use_focus
         self.use_saliency = use_saliency
         self.use_depth = use_depth
 
@@ -111,12 +108,13 @@ class DetPb:
         depth_map = self.depth_selector.estimate_depth(image)
         persons = self.depth_selector.compute_person_depths(depth_map, persons)
 
-        # Compute relative scores (normalize to [0, 1], closer to max depth = main subject)
-        max_depth = max(p["depth"] for p in persons) if persons else 1.0
+        # Compute depth scores (depths are already normalized relative to persons in compute_person_depths)
+        # Depth values: 0.0 = closest person, 1.0 = farthest person
+        # Depth scores: 1.0 = closest person (main subject), 0.0 = farthest person
         for person in persons:
-            person["depth_score"] = (
-                person["depth"] / max_depth if max_depth > 0 else 1.0
-            )
+            person_depth = person.get("depth", 0.0)
+            # Closest person (depth=0.0) gets score 1.0, farthest (depth=1.0) gets 0.0
+            person["depth_score"] = 1.0 - person_depth
 
         return persons, depth_map
 
@@ -128,23 +126,20 @@ class DetPb:
         depth_thr: float,
         combined_thr: float,
     ) -> List[Dict]:
-        """
-        Classify photobombers using weighted combination.
-
-        All scores and thresholds are normalized to [0, 1] scale:
-        - focus_score: 1.0 = sharpest person, 0.0 = blurriest
-        - saliency_score: 1.0 = most salient person, 0.0 = least salient
-        - depth_score: 1.0 = closest person (max depth), 0.0 = farthest
-        - combined_score: weighted average of saliency + depth scores
-
-        Priority order:
-          1. If BLURRED (focus_score < focus_thr) → Photobomber
-          2. Else use weighted combination of saliency + depth
-        """
+        """Classify persons using focus, saliency and depth scores in [0, 1]."""
         if not persons:
             return persons
 
-        max_depth = max(p.get("depth", 0.0) for p in persons)
+        # Depth values are already normalized relative to persons (0.0 = closest, 1.0 = farthest)
+        # No need to recompute range since compute_person_depths already normalized them
+        if self.use_depth:
+            min_depth = 0.0  # Closest person (already normalized)
+            max_depth = 1.0  # Farthest person (already normalized)
+            depth_range = 1.0  # Always 1.0 since depths are normalized
+        else:
+            max_depth = 1.0
+            min_depth = 0.0
+            depth_range = 1.0
 
         for person in persons:
             focus_score = person.get("focus_score", 1.0)
@@ -152,39 +147,78 @@ class DetPb:
             depth_score = person.get("depth_score", 1.0)
 
             # Priority conditions
-            # Use absolute threshold if available, otherwise relative
-            if person.get("is_absolutely_blurred", False):
-                is_blurred = True
+            # Blur detection (if enabled)
+            if self.use_focus:
+                # Use absolute threshold if available, otherwise relative
+                if person.get("is_absolutely_blurred", False):
+                    is_blurred = True
+                else:
+                    # Relative threshold as fallback
+                    is_blurred = focus_score < focus_thr
             else:
-                # Relative threshold as fallback
-                is_blurred = focus_score < focus_thr
+                is_blurred = False
             
             low_saliency = saliency_score < saliency_thr
 
-            # Depth: check if significantly different from closest person
-            depth_diff = abs(person.get("depth", max_depth) - max_depth)
-            is_depth_outlier = depth_diff > depth_thr
+            # Depth: threshold-based classification relative to closest person
+            # Depths are already normalized: 0.0 = closest person, 1.0 = farthest person
+            # If person's depth <= thr: keep (not photobomber)
+            # If person's depth > thr: remove (photobomber)
+            if self.use_depth:
+                person_depth = person.get("depth", 0.0)  # Already normalized (0.0 = closest)
+                # depth_thr is relative: 0.15 means 15% of the depth range from closest person
+                # Since depths are normalized, we can directly compare: depth > thr means outlier
+                # Closest person (depth=0.0) should be KEPT, farther persons (depth > thr) should be REMOVED
+                is_depth_outlier = person_depth > depth_thr
+                person["depth_diff"] = person_depth  # Distance from closest (already normalized)
+                person["relative_depth"] = person_depth  # Same as depth_diff (for consistency)
+            else:
+                is_depth_outlier = False
+                person["depth_diff"] = 0.0
+                person["relative_depth"] = 0.0
 
             # Update person dict
             person["is_blurred"] = is_blurred
             person["is_low_saliency"] = low_saliency
             person["is_depth_outlier"] = is_depth_outlier
-            person["depth_diff"] = depth_diff
 
-            # 1. Blur-first rule
-            if is_blurred:
+            # 1. Blur-first rule (only if focus detection is enabled)
+            if self.use_focus and is_blurred:
                 person["is_photobomber"] = True
                 person["removal_reason"] = "blurred"
                 person["combined_score"] = focus_score
                 continue
 
-            # 2 & 3: Combined score from enabled paradigms only
+            # 2. Depth-based removal rule (if depth is enabled, check depth outlier first)
+            if self.use_depth and is_depth_outlier:
+                person["is_photobomber"] = True
+                person["removal_reason"] = "depth_outlier"
+                # Set combined_score for consistency
+                if self.use_saliency:
+                    w_s = self.weights.saliency
+                    w_d = self.weights.depth
+                    total_weight = w_s + w_d
+                    person["combined_score"] = (saliency_score * w_s + depth_score * w_d) / total_weight
+                else:
+                    person["combined_score"] = depth_score
+                continue
+
+            # 3. Depth-only mode (if only depth is enabled, and not an outlier, keep)
+            if self.use_depth and not self.use_saliency and not self.use_focus:
+                # Not a depth outlier, so keep
+                person["is_photobomber"] = False
+                person["removal_reason"] = None
+                person["combined_score"] = depth_score
+                continue
+
+            # 4. No paradigms enabled
             if not self.use_saliency and not self.use_depth:
                 person["is_photobomber"] = False
                 person["removal_reason"] = None
                 person["combined_score"] = 1.0
                 continue
 
+            # 5. Combined score from enabled paradigms (saliency + depth, but depth already checked)
             w_s = self.weights.saliency if self.use_saliency else 0.0
             w_d = self.weights.depth if self.use_depth else 0.0
             total_weight = w_s + w_d
@@ -194,15 +228,11 @@ class DetPb:
 
             person["combined_score"] = combined_score
 
-            # Final decision
+            # Final decision (only saliency-based now, since depth outliers already handled)
             if combined_score < combined_thr:
                 person["is_photobomber"] = True
-                if low_saliency and is_depth_outlier:
-                    person["removal_reason"] = "low_saliency_and_depth"
-                elif low_saliency:
+                if low_saliency:
                     person["removal_reason"] = "low_saliency"
-                elif is_depth_outlier:
-                    person["removal_reason"] = "depth_outlier"
                 else:
                     person["removal_reason"] = "low_combined_score"
             else:
@@ -217,7 +247,7 @@ class DetPb:
         persons: List[Dict],
         focus_thr: float = 0.4,
         saliency_threshold: float = 0.5,
-        depth_threshold: float = 0.15,
+        depth_threshold: float = 0.1,
         combined_threshold: float = 0.5,
         absolute_focus_thr: float = None,
     ) -> Dict:
@@ -234,8 +264,14 @@ class DetPb:
                 "depth_map": None,
             }
 
-        # 1) Focus (always on)
-        persons = self.analyze_focus(image, persons, absolute_focus_thr=absolute_focus_thr)
+        # 1) Focus (optional)
+        if self.use_focus:
+            persons = self.analyze_focus(image, persons, absolute_focus_thr=absolute_focus_thr)
+        else:
+            for p in persons:
+                p["focus_score"] = 1.0
+                p["sharpness"] = 1.0
+                p["is_absolutely_blurred"] = False
         # 2) Saliency (optional)
         if self.use_saliency:
             persons, saliency_map = self.analyze_saliency(image, persons)

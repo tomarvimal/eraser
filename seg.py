@@ -12,17 +12,7 @@ class ObjSeg:
         return res
 
     def person_mask(self,results):
-        """
-        Extract only person masks from results
-
-        Returns:
-            list of dicts: [{
-                'id': int,  # unique per detected person
-                'mask': np.ndarray (H, W) float32 mask in [0, 1],
-                'bbox': np.ndarray [x1, y1, x2, y2] (float),
-                'confidence': float
-            }, ...]
-        """
+        """Return list of person dicts (id, mask, bbox, confidence)."""
         persons = []
         if results[0].masks is None:
             return persons
